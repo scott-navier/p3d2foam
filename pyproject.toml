@@ -1,0 +1,18 @@
+[project]
+name = "p3d2foam"
+version = "0.1.0"
+description = "Convert NASA TMR Plot3D multi-block grids to OpenFOAM format"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pyyaml",
+    "foamlib",
+    "plot3d",
+]
+
+[project.scripts]
+p3d2foam = "p3d2foam.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
