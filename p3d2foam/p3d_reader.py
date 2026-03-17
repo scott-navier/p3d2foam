@@ -23,6 +23,7 @@ def read_plot3d(
     filename: str | Path,
     binary: bool = False,
     big_endian: bool = False,
+    fortran: bool = False,
 ) -> list:
     """Read a multi-block Plot3D grid file.
 
@@ -30,13 +31,70 @@ def read_plot3d(
     For ASCII files, handles both dimension header formats and
     Fortran repeat notation.
 
+    Args:
+        filename: Path to the Plot3D grid file.
+        binary: True for raw binary files (.p3d).
+        big_endian: True if binary file is big-endian.
+        fortran: True for Fortran unformatted binary (.ufmt) with record markers.
+
     Returns a list of ``plot3d.Block`` objects.
     """
+    if fortran:
+        return _read_fortran(Path(filename))
+
     if binary:
-        from plot3d import read_plot3D as _read_binary
-        return _read_binary(str(filename), binary=True, big_endian=big_endian)
+        from plot3d import read_plot3D as _read_plot3d
+        return _read_plot3d(str(filename), binary=True, big_endian=big_endian)
 
     return _read_ascii(Path(filename))
+
+
+def _read_fortran(path: Path) -> list:
+    """Read a Fortran unformatted binary Plot3D file (.ufmt).
+
+    Handles both layouts:
+    - "whole" format: X,Y,Z concatenated in a single record per block
+    - "split" format: separate records for X, Y, Z per block
+    """
+    from plot3d import Block
+    from scipy.io import FortranFile
+
+    logger.info("Reading Fortran unformatted Plot3D: %s", path)
+
+    f = FortranFile(str(path), "r")
+    nblocks = f.read_ints("i4")[0]
+    dims_flat = f.read_ints("i4")
+
+    dims: list[tuple[int, int, int]] = []
+    for i in range(nblocks):
+        dims.append((int(dims_flat[3 * i]), int(dims_flat[3 * i + 1]), int(dims_flat[3 * i + 2])))
+
+    blocks = []
+    for b, (idim, jdim, kdim) in enumerate(dims):
+        n = idim * jdim * kdim
+        data = f.read_reals("f8")
+
+        if len(data) == 3 * n:
+            # "Whole" format: X, Y, Z concatenated in one record
+            X = data[0:n].reshape((idim, jdim, kdim), order="F")
+            Y = data[n:2*n].reshape((idim, jdim, kdim), order="F")
+            Z = data[2*n:3*n].reshape((idim, jdim, kdim), order="F")
+        elif len(data) == n:
+            # "Split" format: separate records per component
+            X = data.reshape((idim, jdim, kdim), order="F")
+            Y = f.read_reals("f8").reshape((idim, jdim, kdim), order="F")
+            Z = f.read_reals("f8").reshape((idim, jdim, kdim), order="F")
+        else:
+            raise ValueError(
+                f"Block {b+1}: expected {n} or {3*n} values, got {len(data)}"
+            )
+
+        blocks.append(Block(X, Y, Z))
+        logger.debug("Block %d: (%d, %d, %d) = %d nodes", b + 1, idim, jdim, kdim, n)
+
+    f.close()
+    logger.info("Read %d blocks from Fortran file", len(blocks))
+    return blocks
 
 
 def _read_ascii(path: Path) -> list:

@@ -54,6 +54,11 @@ def main(argv: list[str] | None = None) -> None:
         help="Binary file is big-endian",
     )
     parser.add_argument(
+        "--fortran",
+        action="store_true",
+        help="Read Fortran unformatted binary (.ufmt) with record markers",
+    )
+    parser.add_argument(
         "--scale",
         type=float,
         nargs=3,
@@ -91,6 +96,8 @@ def main(argv: list[str] | None = None) -> None:
             config.binary = True
         if args.big_endian:
             config.big_endian = True
+        if args.fortran:
+            config.fortran = True
         if args.scale:
             config.scale = tuple(args.scale)
     else:
@@ -102,6 +109,7 @@ def main(argv: list[str] | None = None) -> None:
             case_dir=args.case_dir,
             binary=args.binary,
             big_endian=args.big_endian,
+            fortran=args.fortran,
             scale=tuple(args.scale) if args.scale else None,
         )
 
@@ -110,7 +118,7 @@ def main(argv: list[str] | None = None) -> None:
         from .nmf import NeutralMapFile
         from .p3d_reader import read_plot3d
 
-        blocks = read_plot3d(config.p3d_file, binary=config.binary, big_endian=config.big_endian)
+        blocks = read_plot3d(config.p3d_file, binary=config.binary, big_endian=config.big_endian, fortran=config.fortran)
         nmf = NeutralMapFile(config.nmf_file)
 
         writer = GmshWriter()

@@ -39,7 +39,7 @@ class FoamPipeline:
 
         # Step 1: Read inputs
         logger.info("Reading Plot3D file: %s", cfg.p3d_file)
-        blocks = read_plot3d(cfg.p3d_file, binary=cfg.binary, big_endian=cfg.big_endian)
+        blocks = read_plot3d(cfg.p3d_file, binary=cfg.binary, big_endian=cfg.big_endian, fortran=cfg.fortran)
         logger.info("Read %d blocks", len(blocks))
 
         logger.info("Reading NMF file: %s", cfg.nmf_file)
@@ -72,8 +72,8 @@ class FoamPipeline:
         logger.info("Running gmshToFoam")
         case.run(["gmshToFoam", "-keepOrientation", str(msh_path)])
 
-        # Step 6: stitchMesh (if multi-block)
-        if len(blocks) > 1:
+        # Step 6: stitchMesh (if interfaces exist)
+        if len(blocks) > 1 or nmf.interfaces or cfg.interfaces:
             pairs = self._resolve_interfaces(nmf, blocks)
             if pairs:
                 self._write_stitch_tolerances(case_dir)

@@ -59,3 +59,4 @@ class ConversionConfig:
     stitch_tolerances: dict | None = None
     binary: bool = False
     big_endian: bool = False
+    fortran: bool = False  # Fortran unformatted binary (.ufmt)
