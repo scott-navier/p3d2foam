@@ -57,6 +57,7 @@ class ConversionConfig:
     interfaces: list[tuple[str, str]] | None = None
     scale: tuple[float, float, float] | None = None
     stitch_tolerances: dict | None = None
+    boundary_types: dict[str, str] | None = None  # NMF name → OF type overrides
     binary: bool = False
     big_endian: bool = False
     fortran: bool = False  # Fortran unformatted binary (.ufmt)

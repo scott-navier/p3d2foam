@@ -89,13 +89,20 @@ class FoamPipeline:
                     if mesh_phi.exists():
                         mesh_phi.unlink()
 
-        # Step 7: transformPoints (if scale specified)
+        # Step 7: Collapse degenerate edges (zero-area faces from pole singularities etc.)
+        self._collapse_degenerate_faces(case_dir, case)
+
+        # Step 8: Set boundary types based on NMF names
+        # (runs after collapseEdges so pole patches with 0 faces get type empty)
+        self._set_boundary_types(case_dir, nmf)
+
+        # Step 9: transformPoints (if scale specified)
         if cfg.scale:
             sx, sy, sz = cfg.scale
             logger.info("Scaling mesh by (%s, %s, %s)", sx, sy, sz)
             case.run(["transformPoints", "-scale", f"({sx} {sy} {sz})"])
 
-        # Step 8: renumberMesh + checkMesh
+        # Step 10: renumberMesh + checkMesh
         logger.info("Running renumberMesh")
         case.run(["renumberMesh", "-overwrite"])
 
@@ -176,6 +183,144 @@ class FoamPipeline:
                     pairs.append((name1, name2))
 
         return pairs
+
+    # Default mapping from NMF boundary names/types to OpenFOAM boundary types.
+    # Matches are case-insensitive substrings. First match wins.
+    # Users can override via config.boundary_types dict.
+    _NMF_TO_OF_TYPE = [
+        # NMF standard types (from spec)
+        ("wall", "wall"),
+        ("viscous", "wall"),          # viscous_solid from TMR generator
+        ("symmetry", "symmetry"),
+        # TMR generator specific names
+        ("back_pressure", "symmetry"),  # root symmetry plane in TMR wing grids
+        ("pole", "empty"),             # collapsed singularity (0 faces after collapseEdges)
+        # Everything else stays as "patch" (farfield, inflow, outflow, etc.)
+    ]
+
+    def _set_boundary_types(self, case_dir: Path, nmf: NeutralMapFile) -> None:
+        """Patch constant/polyMesh/boundary to set correct OpenFOAM types.
+
+        gmshToFoam creates all boundaries as 'type patch'. This method
+        updates them based on the NMF boundary name/type using a keyword
+        mapping (e.g., 'viscous_solid' → wall, 'back_pressure' → symmetry).
+        """
+        bnd_path = case_dir / "constant" / "polyMesh" / "boundary"
+        if not bnd_path.exists():
+            return
+
+        # Build name → OF type mapping
+        overrides = self.config.boundary_types or {}
+        type_map: dict[str, str] = {}
+
+        for bdry in nmf.boundaries:
+            name = bdry.name
+            if name in overrides:
+                type_map[name] = overrides[name]
+            else:
+                type_map[name] = self._infer_of_type(name)
+
+        # Also handle interface patches (stitched to 0 faces → empty)
+        for iface in nmf.interfaces:
+            type_map[iface.boundary_a.name] = "empty"
+            type_map[iface.boundary_b.name] = "empty"
+
+        if not type_map:
+            return
+
+        # Patch the boundary file.
+        # The boundary file is a list of (name, dict) tuples accessed via bnd[None].
+        bnd = FoamFile(bnd_path)
+        entries = bnd[None]
+        changed = []
+        new_entries = []
+        for name, props in entries:
+            of_type = type_map.get(name)
+            if of_type and of_type != "patch" and props.get("type") != of_type:
+                props = dict(props)
+                props["type"] = of_type
+                changed.append(f"{name} → {of_type}")
+            new_entries.append((name, props))
+
+        if changed:
+            bnd[None] = new_entries
+            logger.info("Set boundary types: %s", ", ".join(changed))
+
+    @classmethod
+    def _infer_of_type(cls, nmf_name: str) -> str:
+        """Infer OpenFOAM boundary type from an NMF boundary name."""
+        lower = nmf_name.lower()
+        for keyword, of_type in cls._NMF_TO_OF_TYPE:
+            if keyword in lower:
+                return of_type
+        return "patch"
+
+    @staticmethod
+    def _collapse_degenerate_faces(case_dir: Path, case: FoamCase) -> None:
+        """Run checkMesh to find zero-area faces, then collapse them.
+
+        Plot3D grids with pole singularities (e.g., C-grid wing tips)
+        produce zero-area faces that cause FPE in solvers. This step
+        collapses the degenerate edges to fix them.
+        """
+        # First run checkMesh to generate the zeroAreaFaces set
+        zero_set = case_dir / "constant" / "polyMesh" / "sets" / "zeroAreaFaces"
+        if not zero_set.exists():
+            # checkMesh already ran earlier, but sets may not have been
+            # written if there were no zero-area faces — check the log
+            log_path = case_dir / "log.checkMesh"
+            if log_path.exists():
+                text = log_path.read_text()
+                if "Zero or negative face area" not in text:
+                    logger.info("No zero-area faces — skipping collapseEdges")
+                    return
+
+            # Re-run checkMesh to generate the set
+            case.run(["checkMesh", "-writeSets", "vtk"], log=False)
+
+        if not zero_set.exists():
+            logger.info("No zeroAreaFaces set found — skipping collapseEdges")
+            return
+
+        logger.info("Collapsing degenerate edges (zeroAreaFaces)")
+
+        # Write collapseDict with relaxed quality controls
+        cd = FoamFile(case_dir / "system" / "collapseDict")
+        cd["controlMeshQuality"] = True
+        cd["collapseEdgesCoeffs"] = {
+            "minimumEdgeLength": 1e-6,
+            "maximumMergeAngle": 180,
+        }
+        cd["collapseFacesCoeffs"] = {
+            "initialFaceLengthFactor": 0.5,
+            "maxCollapseFaceToPointSideLengthCoeff": 0.3,
+            "allowEarlyCollapseToPoint": True,
+            "allowEarlyCollapseCoeff": 0.2,
+            "guardFraction": 0.1,
+        }
+        cd["controlMeshQualityCoeffs"] = {
+            "maxNonOrtho": 180,
+            "maxBoundarySkewness": -1,
+            "maxInternalSkewness": -1,
+            "maxConcave": 180,
+            "minVol": -1e30,
+            "minTetQuality": -1e30,
+            "minArea": -1,
+            "minTwist": -1,
+            "minDeterminant": -1,
+            "minFaceWeight": 0,
+            "minVolRatio": 0,
+            "minTriangleTwist": -1,
+            "edgeReductionFactor": 0.5,
+            "faceReductionFactor": 0.5,
+            "maximumSmoothingIterations": 2,
+            "maximumIterations": 10,
+            "maxPointErrorCount": 5,
+        }
+
+        case.run([
+            "collapseEdges", "-collapseFaceSet", "zeroAreaFaces", "-overwrite",
+        ])
 
     def _write_stitch_tolerances(self, case_dir: Path) -> None:
         """Write constant/stitchMeshToleranceDict."""
